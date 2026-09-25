@@ -141,4 +141,4 @@ Consulta el archivo [LICENSE](LICENSE) para más detalles.
 
 **david_wiki**
 
-- GitHub: [@david-wiki](https://github.com/david-wiki)
+- GitHub: [@david-oltra](https://github.com/david-oltra)
