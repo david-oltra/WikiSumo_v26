@@ -1,0 +1,56 @@
+# ============================================
+# CONFIGURACIÓN DEL CHIP ESP32-S3
+# ============================================
+CONFIG_IDF_TARGET="esp32s3"
+CONFIG_IDF_TARGET_ESP32S3=y
+
+# ============================================
+# CPU - 240 MHz
+# ============================================
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ=240
+CONFIG_ESP_SYSTEM_CPU_FREQ_240=y
+CONFIG_ESP_SYSTEM_CPU_FREQ_MHZ=240
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240=y
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_MHZ=240
+
+# ============================================
+# POWER MANAGEMENT - Solo control de frecuencia
+# ============================================
+CONFIG_PM_ENABLE=y
+
+# ============================================
+# FLASH - 4MB
+# ============================================
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+CONFIG_ESPTOOLPY_FLASHFREQ="80m"
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHMODE="qio"
+
+# ============================================
+# FREERTOS - Tick rate 1000Hz para delay preciso
+# ============================================
+CONFIG_FREERTOS_HZ=1000
+
+# ============================================
+# TABLA DE PARTICIONES
+# ============================================
+CONFIG_PARTITION_TABLE_SINGLE_APP=y
+CONFIG_PARTITION_TABLE_CUSTOM=n
+
+
+# ============================================
+# UART - Usar UART1 para dispositivo externo
+# (UART0 permanece para logs por USB)
+# ============================================
+# Redirigir logs de UART0 a USB (para seguir viendo debug)
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_UART=n
+
+# O deshabilitar completamente los logs si no los necesitas
+# CONFIG_BOOTLOADER_LOG_LEVEL_NONE=y
+# CONFIG_LOG_DEFAULT_LEVEL_NONE=y
+
+CONFIG_UART_ISR_IN_IRAM=y
+CONFIG_SPIRAM=n
