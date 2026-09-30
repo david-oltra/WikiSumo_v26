@@ -1,0 +1,23 @@
+# PlatformIO
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# Logs y temporales
+*.log
+*.tmp
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Backups de KiCad
+Schematics/*-backups/
+Schematics/**/*.zip
+
+# Archivos de KiCad que se regeneran
+*.kicad_prl
