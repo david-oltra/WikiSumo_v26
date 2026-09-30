@@ -1,4 +1,4 @@
-# 🤖 WIKISUMO
+# 🤖 WIKISUMO v26
 
 Firmware para robot de competición **MiniSumo** basado en **ESP32-S3**.
 
@@ -8,21 +8,51 @@ Firmware para robot de competición **MiniSumo** basado en **ESP32-S3**.
 
 ## 📋 Descripción
 
-Robot minisumo autónomo con control de motores paso a paso, sensores de distancia ToF, sensores de línea, receptor IR, display OLED y comunicación inalámbrica ESP-NOW.
+Robot de sumo autónomo con control de motores paso a paso por **STEP/DIR (RMT)**, sensores de distancia **ToF**, sensores de línea **QRE1113** con calibración persistente en **NVS**, display OLED de estado, receptor **RC5** y comunicación **ESP-NOW** con el mando.
 
 ---
 
 ## ✨ Características
 
-- 2 motores paso a paso con drivers **TMC2209** (UART + STEP/DIR)
-- 5 sensores de distancia **VL6180X** (ToF, I2C)
-- 6 sensores de línea **QRE1113** (ADC)
-- Leds **WS2812B** (3 LEDs)
-- Display **SSD1306** 128×32 (I2C)
-- Receptor **RC5 (TSOP4838)** para start/stop
-- **ESP-NOW** para recibir estrategia desde mando remoto
-- Persistencia de configuración en **NVS**
-- Arquitectura **FreeRTOS** basada en tareas
+- **2 motores paso a paso** con drivers **TMC2209** (control STEP/DIR vía RMT).
+- **5 sensores de distancia VL6180X** (ToF, I2C con XSHUT).
+- **6 sensores de línea QRE1113** (ADC) con calibración guiada y persistente.
+- **Tira WS2812B** (3 LEDs) para debug visual y señalización.
+- **Display SSD1306** 128×32 (dohyo, strategy, estado).
+- **Receptor RC5 (TSOP4838)** para start/stop.
+- **ESP-NOW** para recibir la strategy desde el mando.
+- Persistencia de configuración en **NVS** (umbrales QRE).
+- **Sistema de zonas** con histéresis (IDLE → SLOW → APPROACH → PUSH).
+- **Cambio dinámico de corriente** según distancia al rival (800 mA ↔ 2000 mA).
+- **Escape de borde** con debounce configurable.
+- **Rampa software** para cambios suaves de velocidad.
+- **Frenada rápida** para inversiones de dirección.
+- Arquitectura **FreeRTOS** basada en tareas.
+
+---
+
+## 🔧 Hardware
+
+### Componentes principales
+
+| Componente         | Cantidad | Descripción                              |
+|--------------------|:--------:|------------------------------------------|
+| ESP32-S3           |    1     | MCU principal                            |
+| TMC2209            |    2     | Driver de motor paso a paso (UART + STEP/DIR) |
+| VL6180X            |   2-5    | Sensor de distancia ToF (I2C)            |
+| QRE1113            |   2-6    | Sensor reflectivo de línea (ADC)         |
+| WS2812B            |    3     | LEDs RGB direccionables                  |
+| SSD1306 (128×32)   |    1     | Display OLED I2C                         |
+| TSOP4838           |    1     | Receptor IR RC5                          |
+
+### Notas de hardware importantes
+
+- **Bus UART single-wire de los TMC2209**: los pines TX (GPIO43) y RX (GPIO44) del ESP32 deben ir unidos al PDN_UART de los drivers. Es imprescindible:
+  - Una **resistencia pull-up** en la línea (interna del ESP32 o externa de 1 kΩ a VIO).
+  - Una **resistencia de 1 kΩ en serie** entre el TX y el PDN_UART.
+  - El RX debe ir **directo** al PDN_UART (sin resistencia en serie).
+- **Pin CLK del TMC2209**: debe estar a **GND** para que use el oscilador interno a 12 MHz y el baud rate de 115200 bps.
+- **Direcciones UART**: MS1/MS2 configuran la dirección de cada driver (0x00, 0x01...). Deben ser distintas.
 
 ---
 
@@ -74,7 +104,7 @@ Robot minisumo autónomo con control de motores paso a paso, sensores de distanc
 | WS2812B data    |   1  |
 | RC5 (TSOP4838)  |  13  |
 | LED de estado   |  48  |
-| Servo PWM       |   6  |
+| Botón BOOT      |   0  |
 
 ---
 
@@ -87,14 +117,36 @@ Robot minisumo autónomo con control de motores paso a paso, sensores de distanc
 - **START** en STOPPED → reinicia el dispositivo
 - **PROGRAM** → cambia el número base de dohyo
 
+### Calibración de los QRE
+
+El robot calibra automáticamente los sensores QRE en el primer arranque:
+
+1. **Paso 1**: colocar el robot sobre **negro**, pulsar BOOT.
+2. **Paso 2**: colocar el **QRE1** sobre **blanco**, pulsar BOOT.
+3. **Paso 3**: colocar el **QRE6** sobre **blanco**, pulsar BOOT.
+
+El umbral se calcula como punto medio entre negro y blanco, y se guarda en NVS.
+
+**Recalibrar** (por ejemplo, al cambiar de dohyo):
+
+1. Encender el robot y esperar a que esté en POWER_ON.
+2. Pulsar **BOOT**.
+3. Seguir los 3 pasos guiados por el display.
+4. El robot guarda los nuevos valores y se reinicia automáticamente.
+
 ### LEDs WS2812B
 
-| Color      | Significado              |
-|------------|--------------------------|
-| 🟢 Verde   | Inicialización correcta  |
-| 🔴 Rojo    | Error en inicialización  |
-| 🟣 Púrpura | Efecto de bienvenida     |
-| ⚫ Apagado | Inactivo                 |
+Modo debug actual (indica estado de sensores):
+
+| LED | Color | Significado |
+|:---:|:---:|---|
+| 0 | 🔵 Azul | VL2 detectando algo |
+| 0 | 🔴 Rojo | QRE1 detectando blanco |
+| 0 | 🟣 Magenta | Ambos a la vez |
+| 1 | 🔵 Azul | VL3 detectando algo |
+| 2 | 🔵 Azul | VL4 detectando algo |
+| 2 | 🔴 Rojo | QRE6 detectando blanco |
+| 2 | 🟣 Magenta | Ambos a la vez |
 
 ---
 
@@ -102,28 +154,67 @@ Robot minisumo autónomo con control de motores paso a paso, sensores de distanc
 
 Recibidas desde el mando remoto vía ESP-NOW:
 
-| ID | Descripción                             |
-|:--:|-----------------------------------------|
-| 0  | Modo por defecto (avance frontal)       |
-| 1  | Giro a la izquierda durante 2 s         |
-| 2  | Emergencia (alterna sentido cada 1 s)   |
+| ID | Descripción |
+|:--:|-------------|
+| 0  | **Default**: avance recto continuo |
+| 1  | **Ataque lateral**: gira a la izquierda 300 ms, luego avance recto |
+| 2  | **Emergencia**: avanza 1 s → gira 1 s → repite (bucle infinito) |
 
-Ajustes dinámicos según distancia frontal (VL6180X #3) y sensores de línea (QRE1113 #1 y #6).
+### Zonas de aproximación al rival
+
+El sistema de **zonas** ajusta automáticamente velocidad y corriente según la distancia frontal (VL6180X #3):
+
+| Zona | Nombre | Distancia | Velocidad | Corriente |
+|:---:|---|---|:---:|:---:|
+| 0 | IDLE | > 120 mm | 1000 Hz | 800 mA |
+| 1 | SLOW | 90-120 mm | 2000 Hz | 800 mA |
+| 2 | APPROACH | 60-90 mm | 2000 Hz | 800 mA |
+| 3 | PUSH | < 60 mm | 500 Hz | **2000 mA** |
+
+La histéresis (umbrales de subida vs bajada) evita oscilaciones cuando la distancia está en el límite.
+
+### Escape por borde
+
+Los QRE1113 controlan la detección de borde del dohyo:
+
+- **QRE1 en blanco** → giro cerrado a la derecha
+- **QRE6 en blanco** → giro cerrado a la izquierda
+- **Ambos en blanco** → marcha atrás recta
+
+El escape dura **300 ms** mínimo aunque el sensor deje de ver la línea, para evitar oscilaciones.
+
+---
+
+## 🔋 Sistema de energía y WiFi
+
+Para evitar el **ruido del WiFi en el ADC2** (donde está QRE6), el firmware:
+
+1. Inicializa ESP-NOW **después** de la calibración (con WiFi OFF).
+2. Mantiene ESP-NOW activo durante POWER_ON (para recibir la strategy).
+3. **Apaga ESP-NOW automáticamente** al pasar a STARTED para liberar el ADC2.
+
+Esto es irreversible sin reiniciar, pero es aceptable porque la strategy se fija antes de la ronda.
 
 ---
 
 ## 🗺️ Roadmap
 
-- [x] Driver TMC2209
-- [x] Sensores VL6180X
-- [x] Sensores QRE1113
-- [x] Leds WS2812B
+- [x] Driver TMC2209 (STEP/DIR con RMT)
+- [x] Sensores VL6180X (I2C)
+- [x] Sensores QRE1113 (ADC + NVS)
+- [x] Tira WS2812B
 - [x] Receptor RC5
 - [x] Display SSD1306
 - [x] ESP-NOW
-- [x] Persistencia NVS
-- [ ] Integración IMU BMI160
-- [ ] Control PID
+- [x] Calibración guiada por botón BOOT
+- [x] Persistencia NVS de umbrales
+- [x] Sistema de zonas con histéresis
+- [x] Cambio dinámico de corriente
+- [x] Estrategias 0, 1, 2
+- [ ] Ajuste del ángulo de montaje de los VL6180X (ven el suelo)
+- [ ] Integración IMU BMI160 (detección de vuelco)
+- [ ] Estrategias adicionales
+- [ ] Optimización del consumo
 
 ---
 
