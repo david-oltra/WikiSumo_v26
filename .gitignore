@@ -21,3 +21,7 @@ Schematics/**/*.zip
 
 # Archivos de KiCad que se regeneran
 *.kicad_prl
+
+# Archivos de lock de KiCad
+*.lck
+~*
