@@ -1152,7 +1152,7 @@ void rc5_task(void *pvParameters)
 #define MOTOR_STEPS_PER_BURST       20
 
 /* Velocidades de referencia (pasos/s) */
-#define MOTOR_SPEED_IDLE            1000    /* Marcha normal                        */
+#define MOTOR_SPEED_IDLE            600    /* Marcha normal                        */
 #define MOTOR_SPEED_PUSH            500    /* Empuje contra rival (dist < 60 mm)   */
 #define MOTOR_SPEED_APPROACH        2000   /* Aproximación (60-90 mm)              */
 #define MOTOR_SPEED_SLOW_APPROACH   2000   /* Aproximación lenta (90-120 mm)       */
@@ -1202,7 +1202,7 @@ void rc5_task(void *pvParameters)
  * así que 3 lecturas ≈ 30 ms de confirmación.
  * Sirve para filtrar falsos positivos por ruido del ADC o reflejos
  * puntuales. */
-#define QRE_DEBOUNCE_COUNT          1
+#define QRE_DEBOUNCE_COUNT          2
 
 /* =====================================================================
  *  HELPER: RÁFAGA DE PASOS SIMULTÁNEA EN AMBOS MOTORES
@@ -1311,6 +1311,7 @@ void tmc2209_task(void *pvParameters)
 
     /* --- Estado de escape por borde (persistente entre iteraciones) --- */
     bool    border_escape_active = false;
+    bool    border_escape_just_started = false;
     int64_t border_escape_start  = 0;
     int8_t  escape_dir_m1        = 0;
     int8_t  escape_dir_m2        = 0;
@@ -1328,6 +1329,11 @@ void tmc2209_task(void *pvParameters)
     * `was_started` sirve para detectar la transición STOPPED→STARTED. */
     int64_t strategy_start_time = 0;
     bool    was_started         = false;
+
+    /* --- Modo "ciego" para la strategy 2 ---
+     * Si está activo, ignoramos VL2, VL3, VL4 y QRE. Solo hacemos
+     * la secuencia avance/giro sin consultar ningún sensor. */
+    bool strategy_blind_mode = false;
 
     /* --- Inicializar pines de dirección --- */
     gpio_set_level(motor1.dir_pin, 0);
@@ -1409,11 +1415,22 @@ void tmc2209_task(void *pvParameters)
         }
 
         /* Detectar transición STOPPED → STARTED y guardar el instante
-         * para que la estrategia 1 pueda contar sus 300 ms. */
+         * para que las estrategias temporizadas (1 y 2) puedan contar.
+         * También reseteamos la zona a IDLE para que cada ronda empiece
+         * desde un estado limpio. */
         if (!was_started) {
             was_started         = true;
             strategy_start_time = esp_timer_get_time();
+            g_last_zone         = 0;   /* ← resetear zona a IDLE */
         }
+
+        /* Resetear bandera de modo ciego al principio de cada iteración.
+         * Solo el case 2 la vuelve a activar. */
+        strategy_blind_mode = false;
+
+        /* Resetear bandera de inicio de escape. Solo se activa cuando
+         * la sección 3.4 detecta un nuevo borde. */
+        border_escape_just_started = false;
 
         /* ============================================================
          *  2) ROBOT LEVANTADO → giro de zafado sobre el eje
@@ -1479,22 +1496,22 @@ void tmc2209_task(void *pvParameters)
                 }
                 break;
 
-                case 2:  /* Emergencia: avanza 1 s, gira 1 s, en bucle */
+                case 2:  /* Emergencia: avanza 1 s, gira 1 s, en bucle.
+                        * Ignora todos los sensores. */
                 {
+                    strategy_blind_mode = true;
+
                     int64_t t = get_elapsed_time_ms(strategy_start_time);
-                    int phase = (t / 1000) % 2;   /* 0 = avance, 1 = giro */
+                    int phase = (t / 500) % 2;    /* 0 = avance, 1 = giro (500 ms cada fase) */
 
                     if (phase == 0) {
-                        /* Fase 0: avance recto */
                         want_dir_m1 = 1;
                         want_dir_m2 = 1;
                     } else {
-                        /* Fase 1: giro sobre el eje (izquierda) */
                         want_dir_m1 = -1;
                         want_dir_m2 =  1;
                     }
 
-                    /* Velocidad de emergencia en ambas fases */
                     want_speed = MOTOR_SPEED_EMERGENCY;
                 }
                 break;
@@ -1505,193 +1522,222 @@ void tmc2209_task(void *pvParameters)
                 break;
         }
 
-        /* --- 3.2 Ajuste por distancia frontal (VL6180X #3) ---
-         * ⚠️  DESHABILITADO: los VL6180X ven el suelo por ángulo de
-         * montaje. Reactivar cuando se solucione físicamente. */
+        /* ============================================================
+         *  3.2/3.3/3.4 SENSORES
+         *  ⚠️  Solo se ejecutan si NO estamos en modo ciego
+         *      (strategy 2). En modo ciego el robot se mueve sin
+         *      consultar ningún sensor.
+         * ============================================================ */
+        if (!strategy_blind_mode) {
+
+            /* --- 3.2 Ajuste por distancia frontal (VL6180X #3) ---
+            * ⚠️  DESHABILITADO: los VL6180X ven el suelo por ángulo de
+            * montaje. Reactivar cuando se solucione físicamente. */
 #if 1
-        if (vl_sensor_3.is_initialized) {
-            uint16_t d = vl_sensor_3.last_distance;
+            if (vl_sensor_3.is_initialized) {
+                uint16_t d = vl_sensor_3.last_distance;
 
-            if (d > 0) {
-                switch (g_last_zone) {
+                if (d > 0) {
+                    switch (g_last_zone) {
 
-                    case 3:  /* PUSH → salir solo si > 75 */
-                        if (d >= 75) {
-                            if (d < 105) {
-                                g_last_zone  = 2;
-                                want_speed   = MOTOR_SPEED_APPROACH;
-                                want_current = MOTOR_CURRENT_IDLE;
-                            } else if (d < 135) {
+                        case 3:  /* PUSH → salir solo si > 75 */
+                            if (d >= 75) {
+                                if (d < 105) {
+                                    g_last_zone  = 2;
+                                    want_speed   = MOTOR_SPEED_APPROACH;
+                                    want_current = MOTOR_CURRENT_IDLE;
+                                } else if (d < 135) {
+                                    g_last_zone  = 1;
+                                    want_speed   = MOTOR_SPEED_SLOW_APPROACH;
+                                    want_current = MOTOR_CURRENT_IDLE;
+                                } else {
+                                    g_last_zone  = 0;
+                                    want_speed   = MOTOR_SPEED_IDLE;
+                                    want_current = MOTOR_CURRENT_IDLE;
+                                }
+                            }
+                            break;
+
+                        case 2:  /* APPROACH → subir a PUSH si < 60, bajar si > 105 */
+                            if (d < 60) {
+                                g_last_zone  = 3;
+                                want_speed   = MOTOR_SPEED_PUSH;
+                                want_current = MOTOR_CURRENT_PUSH;
+                            } else if (d >= 105) {
                                 g_last_zone  = 1;
                                 want_speed   = MOTOR_SPEED_SLOW_APPROACH;
                                 want_current = MOTOR_CURRENT_IDLE;
-                            } else {
+                            }
+                            break;
+
+                        case 1:  /* SLOW → subir si < 90, bajar si > 135 */
+                            if (d < 90) {
+                                g_last_zone  = 2;
+                                want_speed   = MOTOR_SPEED_APPROACH;
+                                want_current = MOTOR_CURRENT_IDLE;
+                            } else if (d >= 135) {
                                 g_last_zone  = 0;
                                 want_speed   = MOTOR_SPEED_IDLE;
                                 want_current = MOTOR_CURRENT_IDLE;
                             }
-                        }
-                        break;
+                            break;
 
-                    case 2:  /* APPROACH → subir a PUSH si < 60, bajar si > 105 */
-                        if (d < 60) {
-                            g_last_zone  = 3;
-                            want_speed   = MOTOR_SPEED_PUSH;
-                            want_current = MOTOR_CURRENT_PUSH;
-                        } else if (d >= 105) {
-                            g_last_zone  = 1;
-                            want_speed   = MOTOR_SPEED_SLOW_APPROACH;
-                            want_current = MOTOR_CURRENT_IDLE;
-                        }
-                        break;
-
-                    case 1:  /* SLOW → subir si < 90, bajar si > 135 */
-                        if (d < 90) {
-                            g_last_zone  = 2;
-                            want_speed   = MOTOR_SPEED_APPROACH;
-                            want_current = MOTOR_CURRENT_IDLE;
-                        } else if (d >= 135) {
-                            g_last_zone  = 0;
-                            want_speed   = MOTOR_SPEED_IDLE;
-                            want_current = MOTOR_CURRENT_IDLE;
-                        }
-                        break;
-
-                    default: /* IDLE → subir según distancia */
-                        if (d < 60) {
-                            g_last_zone  = 3;
-                            want_speed   = MOTOR_SPEED_PUSH;
-                            want_current = MOTOR_CURRENT_PUSH;
-                        } else if (d < 90) {
-                            g_last_zone  = 2;
-                            want_speed   = MOTOR_SPEED_APPROACH;
-                            want_current = MOTOR_CURRENT_IDLE;
-                        } else if (d < 120) {
-                            g_last_zone  = 1;
-                            want_speed   = MOTOR_SPEED_SLOW_APPROACH;
-                            want_current = MOTOR_CURRENT_IDLE;
-                        }
-                        break;
+                        default: /* IDLE → subir según distancia */
+                            if (d < 60) {
+                                g_last_zone  = 3;
+                                want_speed   = MOTOR_SPEED_PUSH;
+                                want_current = MOTOR_CURRENT_PUSH;
+                            } else if (d < 90) {
+                                g_last_zone  = 2;
+                                want_speed   = MOTOR_SPEED_APPROACH;
+                                want_current = MOTOR_CURRENT_IDLE;
+                            } else if (d < 120) {
+                                g_last_zone  = 1;
+                                want_speed   = MOTOR_SPEED_SLOW_APPROACH;
+                                want_current = MOTOR_CURRENT_IDLE;
+                            }
+                            break;
+                    }
                 }
             }
-        }
 #endif
 
-        /* --- 3.3 Sensores laterales VL6180X ---
-         * ⚠️  DESHABILITADO: ven el suelo por ángulo de montaje. */
+            /* --- 3.3 Sensores laterales VL6180X ---
+            *
+            * ⚠️  REVISAR: los VL pueden estar viendo el suelo por
+            *     ángulo de montaje. Ajustar físicamente si es necesario.
+            *
+            * Solo actúan si VL3 está en IDLE (zona 0) o SLOW (zona 1).
+            * Desde APPROACH (zona 2) el sensor central manda, porque
+            * ya está detectando al rival a corta distancia.
+            *
+            * Jerarquía:
+            *   1. QRE (borde)              → sobrescribe todo
+            *   2. VL3 (frontal, zona ≥ 2)  → bloquea laterales
+            *   3. VL2/VL4 (laterales)      → solo en zonas 0 y 1
+            *   4. Strategy (ESP-NOW)       → base */
 #if 1
-        if (vl_sensor_2.is_initialized && vl_sensor_2.last_distance > 0 &&
-            vl_sensor_2.last_distance < 255) {
-            want_dir_m1 = -1;
-        }
-        if (vl_sensor_4.is_initialized && vl_sensor_4.last_distance > 0 &&
-            vl_sensor_4.last_distance < 255) {
-            want_dir_m2 = -1;
-        }
+            if (g_last_zone < 2) {
+                if (vl_sensor_2.is_initialized && vl_sensor_2.last_distance > 0 &&
+                    vl_sensor_2.last_distance < 255) {
+                    want_dir_m1 = -1;
+                }
+                if (vl_sensor_4.is_initialized && vl_sensor_4.last_distance > 0 &&
+                    vl_sensor_4.last_distance < 255) {
+                    want_dir_m2 = -1;
+                }
+            }
 #endif
 
-        /* --- 3.4 Sensores de línea (escape por borde) con debounce ---
-         *
-         * Para evitar falsos positivos por ruido del ADC o reflejos
-         * puntuales, exigimos que el sensor esté por debajo del umbral
-         * durante QRE_DEBOUNCE_COUNT lecturas consecutivas antes de
-         * declarar "borde detectado".
-         *
-         * Lógica de escape:
-         *   - QRE1 (izq) + QRE6 (der) en blanco → MARCHA ATRÁS recta
-         *   - Solo QRE1 en blanco → GIRO cerrado hacia la derecha
-         *   - Solo QRE6 en blanco → GIRO cerrado hacia la izquierda
-         *
-         * El escape dura BORDER_ESCAPE_MIN_MS aunque el sensor deje de
-         * ver la línea, para no oscilar. */
+            /* --- 3.4 Sensores de línea (escape por borde) con debounce ---
+            *
+            * Para evitar falsos positivos por ruido del ADC o reflejos
+            * puntuales, exigimos que el sensor esté por debajo del umbral
+            * durante QRE_DEBOUNCE_COUNT lecturas consecutivas antes de
+            * declarar "borde detectado".
+            *
+            * Lógica de escape:
+            *   - QRE1 (izq) + QRE6 (der) en blanco → MARCHA ATRÁS recta
+            *   - Solo QRE1 en blanco → GIRO cerrado hacia la derecha
+            *   - Solo QRE6 en blanco → GIRO cerrado hacia la izquierda
+            *
+            * El escape dura BORDER_ESCAPE_MIN_MS aunque el sensor deje de
+            * ver la línea, para no oscilar. */
 #if 1
-        bool qre1_raw_hit = (qre_sensor1.threshold > 0 &&
-                             qre_sensor1.raw_value < qre_sensor1.threshold);
-        bool qre6_raw_hit = (qre_sensor6.threshold > 0 &&
-                             qre_sensor6.raw_value < qre_sensor6.threshold);
+            bool qre1_raw_hit = (qre_sensor1.threshold > 0 &&
+                                qre_sensor1.raw_value < qre_sensor1.threshold);
+            bool qre6_raw_hit = (qre_sensor6.threshold > 0 &&
+                                qre_sensor6.raw_value < qre_sensor6.threshold);
 
-        /* Actualizar contadores de debounce */
-        if (qre1_raw_hit) {
-            if (qre1_debounce < QRE_DEBOUNCE_COUNT) qre1_debounce++;
-        } else {
-            qre1_debounce = 0;
-        }
-
-        if (qre6_raw_hit) {
-            if (qre6_debounce < QRE_DEBOUNCE_COUNT) qre6_debounce++;
-        } else {
-            qre6_debounce = 0;
-        }
-
-        /* Solo declaramos "hit" cuando el contador llega al umbral */
-        bool qre1_hit   = (qre1_debounce >= QRE_DEBOUNCE_COUNT);
-        bool qre6_hit   = (qre6_debounce >= QRE_DEBOUNCE_COUNT);
-        bool border_hit = qre1_hit || qre6_hit;
-        bool border_escape_just_started = false;
-
-        if (border_hit) {
-            /* --- Recalcular dirección de escape en cada iteración ---
-             * Así, si empieza girando con un solo QRE y luego el otro
-             * también detecta, el robot pasa a marcha atrás sin tener
-             * que esperar a que termine el escape. */
-            int8_t new_dir_m1, new_dir_m2;
-
-            if (qre1_hit && qre6_hit) {
-                /* Ambos en blanco → marcha atrás recta */
-                new_dir_m1 = -1;
-                new_dir_m2 = -1;
-            } else if (qre1_hit) {
-                /* Solo izquierda → giro cerrado a la derecha */
-                new_dir_m1 = -1;
-                new_dir_m2 =  1;
+            /* Actualizar contadores de debounce */
+            if (qre1_raw_hit) {
+                if (qre1_debounce < QRE_DEBOUNCE_COUNT) qre1_debounce++;
             } else {
-                /* Solo derecha → giro cerrado a la izquierda */
-                new_dir_m1 =  1;
-                new_dir_m2 = -1;
+                qre1_debounce = 0;
             }
 
-            if (!border_escape_active) {
-                /* --- Iniciar un nuevo escape --- */
-                escape_dir_m1        = new_dir_m1;
-                escape_dir_m2        = new_dir_m2;
-                border_escape_active = true;
-                border_escape_start  = esp_timer_get_time();
-                border_escape_just_started = true;
-
-            } else if (new_dir_m1 != escape_dir_m1 ||
-                       new_dir_m2 != escape_dir_m2) {
-                /* --- Cambiar dirección durante el escape ---
-                 * Ej: empezamos girando (un solo QRE) y ahora los dos
-                 * ven blanco → pasamos a marcha atrás. */
-                escape_dir_m1        = new_dir_m1;
-                escape_dir_m2        = new_dir_m2;
-
-                /* ⚠️ Reseteamos el timer para que el nuevo escape
-                 * dure los 300 ms completos desde este momento.
-                 * Si no, podría cambiar de dirección cuando ya casi
-                 * había terminado el escape anterior. */
-                border_escape_start  = esp_timer_get_time();
-                border_escape_just_started = true;
+            if (qre6_raw_hit) {
+                if (qre6_debounce < QRE_DEBOUNCE_COUNT) qre6_debounce++;
+            } else {
+                qre6_debounce = 0;
             }
-        } else {
-            /* Sin borde: comprobar si terminamos el escape */
-            if (border_escape_active) {
-                int64_t elapsed_ms =
-                    (esp_timer_get_time() - border_escape_start) / 1000;
-                if (elapsed_ms >= BORDER_ESCAPE_MIN_MS) {
-                    border_escape_active = false;
+
+            /* Solo declaramos "hit" cuando el contador llega al umbral */
+            bool qre1_hit   = (qre1_debounce >= QRE_DEBOUNCE_COUNT);
+            bool qre6_hit   = (qre6_debounce >= QRE_DEBOUNCE_COUNT);
+            bool border_hit = qre1_hit || qre6_hit;
+
+            if (border_hit) {
+                /* --- Recalcular dirección de escape en cada iteración ---
+                * Así, si empieza girando con un solo QRE y luego el otro
+                * también detecta, el robot pasa a marcha atrás sin tener
+                * que esperar a que termine el escape. */
+                int8_t new_dir_m1, new_dir_m2;
+
+                if (qre1_hit && qre6_hit) {
+                    /* Ambos en blanco → marcha atrás recta */
+                    new_dir_m1 = -1;
+                    new_dir_m2 = -1;
+                } else if (qre1_hit) {
+                    /* Solo izquierda → giro cerrado a la derecha */
+                    new_dir_m1 = -1;
+                    new_dir_m2 =  1;
+                } else {
+                    /* Solo derecha → giro cerrado a la izquierda */
+                    new_dir_m1 =  1;
+                    new_dir_m2 = -1;
+                }
+
+                if (!border_escape_active) {
+                    /* --- Iniciar un nuevo escape --- */
+                    escape_dir_m1        = new_dir_m1;
+                    escape_dir_m2        = new_dir_m2;
+                    border_escape_active = true;
+                    border_escape_start  = esp_timer_get_time();
+                    border_escape_just_started = true;
+
+                } else if (new_dir_m1 != escape_dir_m1 ||
+                        new_dir_m2 != escape_dir_m2) {
+                    /* --- Cambiar dirección durante el escape ---
+                    * Ej: empezamos girando (un solo QRE) y ahora los dos
+                    * ven blanco → pasamos a marcha atrás. */
+                    escape_dir_m1        = new_dir_m1;
+                    escape_dir_m2        = new_dir_m2;
+
+                    /* ⚠️ Reseteamos el timer para que el nuevo escape
+                    * dure los 300 ms completos desde este momento.
+                    * Si no, podría cambiar de dirección cuando ya casi
+                    * había terminado el escape anterior. */
+                    border_escape_start  = esp_timer_get_time();
+                    border_escape_just_started = true;
+                }
+            } else {
+                /* Sin borde: comprobar si terminamos el escape */
+                if (border_escape_active) {
+                    int64_t elapsed_ms =
+                        (esp_timer_get_time() - border_escape_start) / 1000;
+                    if (elapsed_ms >= BORDER_ESCAPE_MIN_MS) {
+                        border_escape_active = false;
+                    }
                 }
             }
-        }
 
-        /* Sobrescribir el objetivo si estamos escapando */
-        if (border_escape_active) {
-            want_dir_m1  = escape_dir_m1;
-            want_dir_m2  = escape_dir_m2;
-            want_speed   = MOTOR_SPEED_ESCAPE;
-            want_current = MOTOR_CURRENT_PUSH;
-        }
+            /* Sobrescribir el objetivo si estamos escapando */
+            if (border_escape_active) {
+                want_dir_m1  = escape_dir_m1;
+                want_dir_m2  = escape_dir_m2;
+                want_speed   = MOTOR_SPEED_ESCAPE;
+                want_current = MOTOR_CURRENT_PUSH;
+            }
 #endif
+
+        /* ============================================================
+         *  3.2/3.3/3.4 SENSORES
+         *  ⚠️  Solo se ejecutan si NO estamos en modo ciego
+         *      (strategy 2). En modo ciego el robot se mueve sin
+         *      consultar ningún sensor.
+         * ============================================================ */
+        }  /* fin del if (!strategy_blind_mode) */
 
         /* ============================================================
          *  4) APLICAR CAMBIOS (corriente y dirección)
